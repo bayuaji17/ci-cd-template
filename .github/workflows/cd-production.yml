@@ -1,0 +1,97 @@
+name: CD Production
+
+on:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    NODE_VERSION: 24
+    PM2_APP_NAME: cicd-template
+
+concurrency:
+    group: cd-production
+    cancel-in-progress: true
+
+jobs:
+    deploy:
+        name: Build and Deploy
+        runs-on: ubuntu-latest
+        environment: production
+        env:
+            VPS_HOST: ${{ secrets.VPS_HOST }}
+            VPS_USER: ${{ secrets.VPS_USER }}
+            VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+            VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+            VPS_APP_DIR: ${{ secrets.VPS_APP_DIR || '/var/www/cicd-template' }}
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run linter
+              run: npm run lint
+
+            - name: Run tests
+              run: npm test
+
+            - name: Build application
+              run: npm run build
+
+            - name: Prepare release artifact
+              run: |
+                  mkdir -p release
+                  cp -R dist package.json package-lock.json release/
+
+            - name: Validate deployment secrets
+              run: |
+                  test -n "$VPS_HOST"
+                  test -n "$VPS_USER"
+                  test -n "$VPS_PORT"
+                  test -n "$VPS_SSH_KEY"
+                  test -n "$VPS_APP_DIR"
+
+            - name: Configure SSH
+              run: |
+                  mkdir -p ~/.ssh
+                  printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+                  chmod 600 ~/.ssh/deploy_key
+                  ssh-keyscan -p "$VPS_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+            - name: Create app directory on VPS
+              run: |
+                  ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "mkdir -p '$VPS_APP_DIR'"
+
+            - name: Upload release to VPS
+              run: |
+                  rsync -az --delete \
+                      -e "ssh -i ~/.ssh/deploy_key -p $VPS_PORT" \
+                      release/ "$VPS_USER@$VPS_HOST:$VPS_APP_DIR/"
+
+            - name: Install production dependencies and reload app
+              run: |
+                  ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "
+                      set -e
+                      cd '$VPS_APP_DIR'
+                      npm ci --omit=dev
+                      if pm2 describe '$PM2_APP_NAME' > /dev/null; then
+                          pm2 reload '$PM2_APP_NAME' --update-env
+                      else
+                          pm2 start dist/index.js --name '$PM2_APP_NAME'
+                      fi
+                      pm2 save
+                  "
