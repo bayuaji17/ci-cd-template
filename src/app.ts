@@ -7,7 +7,7 @@ export const app = new Hono();
 
 app.get("/", (c) => {
     return c.json({
-        message: "Hello Hono!, ci cd successful",
+        message: "Hello Hono!, test ci cd successful",
     });
 });
 
